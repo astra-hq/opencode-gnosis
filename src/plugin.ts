@@ -73,7 +73,8 @@ export default (async (_input: PluginInput, options?: Record<string, unknown>): 
   }
 
   const client = new GnosisClient(config.gnosis_url, config.gnosis_token, config.timeout, config.add_timeout);
-  const breaker = new CircuitBreaker();
+  const readBreaker = new CircuitBreaker();
+  const writeBreaker = new CircuitBreaker();
 
   // Resolve user_id: if explicitly configured (not the default), use it;
   // otherwise let the gateway assign a native id.
@@ -89,7 +90,7 @@ export default (async (_input: PluginInput, options?: Record<string, unknown>): 
   };
 
   const metadata: Record<string, unknown> = { channel: "opencode" };
-  const tools = new GnosisTools(client, scope, breaker, metadata);
+  const tools = new GnosisTools(client, scope, readBreaker, writeBreaker, metadata);
 
   // -------------------------------------------------------------------------
   // Auto-recall: before each turn, search gnosis and inject relevant memories
@@ -99,7 +100,7 @@ export default (async (_input: PluginInput, options?: Record<string, unknown>): 
     _input: { messages: Array<Record<string, unknown>> },
     output: { messages: Array<Record<string, unknown>> },
   ): Promise<void> => {
-    if (breaker.isOpen()) return;
+    if (readBreaker.isOpen()) return;
 
     // Find the latest user message to use as the recall query
     const messages = output.messages;
@@ -138,7 +139,7 @@ export default (async (_input: PluginInput, options?: Record<string, unknown>): 
         memoryBlock = renderSearchResults(results);
       }
 
-      breaker.recordSuccess();
+      readBreaker.recordSuccess();
 
       if (memoryBlock) {
         // Prepend a synthetic system message with the memory context
@@ -150,7 +151,7 @@ export default (async (_input: PluginInput, options?: Record<string, unknown>): 
         });
       }
     } catch (error) {
-      breaker.recordFailure();
+      readBreaker.recordFailure();
       console.debug("[opencode-gnosis] Auto-recall failed:", error);
     }
   };
@@ -163,7 +164,7 @@ export default (async (_input: PluginInput, options?: Record<string, unknown>): 
     input: { context: string[] },
     output: { prompt?: string; context?: string[] },
   ): Promise<void> => {
-    if (breaker.isOpen()) return;
+    if (writeBreaker.isOpen()) return;
 
     const context = output.context ?? input.context;
     if (!context || context.length === 0) return;
@@ -177,9 +178,9 @@ export default (async (_input: PluginInput, options?: Record<string, unknown>): 
         infer: true,
         metadata: { ...metadata, source: "compaction" },
       });
-      breaker.recordSuccess();
+      writeBreaker.recordSuccess();
     } catch (error) {
-      breaker.recordFailure();
+      writeBreaker.recordFailure();
       console.debug("[opencode-gnosis] Compaction sync failed:", error);
     }
   };
@@ -209,7 +210,9 @@ export default (async (_input: PluginInput, options?: Record<string, unknown>): 
         description:
           "Store a durable fact about the user, verbatim (no LLM extraction). " +
           "Call this the moment the user states a lasting preference, correction, decision, " +
-          "or personal detail worth recalling on future turns.",
+          "or personal detail worth recalling on future turns. " +
+          "Optionally tag the source (source_type, source_url, source_title, authority_score) " +
+          "so the gnosis server can rank and segment the fact when source-aware features are enabled.",
         args: AddArgs,
         execute: (args) => tools.add(args),
       },
